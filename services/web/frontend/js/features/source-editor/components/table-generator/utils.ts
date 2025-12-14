@@ -10,7 +10,11 @@ import {
   WidthSelection,
 } from './toolbar/column-width-modal/column-width'
 
-const COMMIT_CHARACTERS = ['c', 'l', 'r', 'p', 'm', 'b', '>']
+// Column "tokens" that start a new column. Keep this in sync with the column
+// types we support in the visual table widget.
+//
+// Note: `X` is used by `tabularx` / `tabular*`-style environments.
+const COMMIT_CHARACTERS = ['c', 'l', 'r', 'p', 'm', 'b', 'X', '>']
 
 export type CellPosition = { from: number; to: number }
 export type RowPosition = {
@@ -101,6 +105,13 @@ export function parseColumnSpecifications(
         currentAlignment = 'right'
         currentContent += 'r'
         break
+      case 'X': {
+        // `tabularx` flexible-width paragraph column.
+        currentIsParagraphColumn = true
+        currentAlignment = 'paragraph'
+        currentContent += 'X'
+        break
+      }
       case 'p':
       case 'm':
       case 'b': {
@@ -450,17 +461,42 @@ export function generateTable(
   node: SyntaxNode,
   state: EditorState
 ): ParsedTableData {
-  const specification = node
-    .getChild('BeginEnv')
-    ?.getChild('TextArgument')
-    ?.getChild('LongArg')
+  const beginEnv = node.getChild('BeginEnv')
+  if (!beginEnv) {
+    throw new Error('Missing tabular begin environment')
+  }
+
+  // Some environments (e.g. `tabularx`, `tabular*`) have an extra "width"
+  // argument before the column specification:
+  //   \begin{tabularx}{\textwidth}{|c|X|}
+  // For robustness, scan the *direct* TextArguments on the BeginEnv and pick
+  // the first one that parses as a non-empty column specification.
+  let specification: SyntaxNode | null = null
+  let columns: ColumnDefinition[] = []
+  for (let child = beginEnv.firstChild; child; child = child.nextSibling) {
+    if (!child.type.is('TextArgument')) {
+      continue
+    }
+    const longArg = child.getChild('LongArg')
+    if (!longArg) {
+      continue
+    }
+    const maybeColumns = parseColumnSpecifications(
+      state.sliceDoc(longArg.from, longArg.to)
+    )
+    if (maybeColumns.length > 0) {
+      specification = longArg
+      columns = maybeColumns
+      break
+    }
+    // Keep the last arg around as a fallback to produce a helpful error.
+    specification = longArg
+    columns = maybeColumns
+  }
 
   if (!specification) {
     throw new Error('Missing column specification')
   }
-  const columns = parseColumnSpecifications(
-    state.sliceDoc(specification.from, specification.to)
-  )
   const body = node.getChild('Content')?.getChild('TabularContent')
   if (!body) {
     throw new Error('Missing table body')
